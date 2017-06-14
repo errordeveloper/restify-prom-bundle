@@ -28,10 +28,6 @@ export interface IPreMiddlewareConfig {
    */
   route?: string | false;
   /**
-   * Default metrics.
-   */
-  defaults?: string[];
-  /**
    * Excluded paths.
    */
   exclude?: string | string[] | RegExp | Function;
@@ -43,10 +39,6 @@ export interface IPreMiddlewareConfig {
    * How often (ms) should prom-client fire default probes.
    */
   promDefaultDelay?: number;
-  /**
-   * How many path at max should we count.
-   */
-  maxPathsToCount?: number;
 }
 
 /**
@@ -54,11 +46,6 @@ export interface IPreMiddlewareConfig {
  */
 const defaultConfig: IPreMiddlewareConfig = {
   route: '/metrics',
-  defaults: [
-    'status',
-    'pathDuration',
-    'pathCount',
-  ],
   maxPathsToCount: 100,
   promDefaultDelay: 1000,
   promBlacklist: [],
@@ -68,9 +55,8 @@ const defaultConfig: IPreMiddlewareConfig = {
  * Bundle metrics.
  */
 interface IBundleMetrics {
-  status?: client.Counter;
-  pathDuration?: client.Histogram;
-  pathCount?: client.Counter;
+  requestHistogram?: client.Histogram;
+  requestCounter?: client.Counter;
 }
 
 /**
@@ -132,9 +118,6 @@ const checkConfig = (userConfig?: IPreMiddlewareConfig): IPreMiddlewareConfig =>
   ) {
     throw new TypeError('`route` option for restify-prom-bundle.middleware() must be a non empty string or false');
   }
-  if (!Array.isArray(config.defaults)) {
-    throw new TypeError('`defaults` option for restify-prom-bundle.middleware() must be an array');
-  }
   if (typeof config.exclude === 'string') {
     config.exclude = [ <string>config.exclude ];
   }
@@ -165,31 +148,21 @@ const checkConfig = (userConfig?: IPreMiddlewareConfig): IPreMiddlewareConfig =>
  */
 const initMetrics = (config: IPreMiddlewareConfig): IBundleMetrics => {
   const metrics: IBundleMetrics = {};
+  const labels: Array = ['path', 'status_code', 'method'];
 
-  if (config.defaults.indexOf('status') !== -1) {
-    debug('Init restify_status_codes status metrics');
-    metrics.status = new client.Counter(
-      'restify_status_codes',
-      'Number of response for each HTTP status code.',
-      ['status_code'],
-    );
-  }
-  if (config.defaults.indexOf('pathDuration') !== -1) {
-    debug('Init restify_path_duration status metrics');
-    metrics.pathDuration = new client.Histogram(
-      'restify_path_duration',
-      'Histogram of response time in seconds for each request path / status code',
-      ['path', 'status_code', 'method'],
-    );
-  }
-  if (config.defaults.indexOf('pathCount') !== -1) {
-    debug('Init restify_path_count status metrics');
-    metrics.pathCount = new client.Counter(
-      'restify_path_count',
-      'Number of calls to each path',
-      ['path', 'status_code', 'method'],
-    );
-  }
+  metrics.requestHistogram = new client.Histogram(
+    'http_request_duration_miliseconds',
+    'Response time in seconds for each request',
+    labels,
+    {
+      buckets: [0.003, 0.03, 0.1, 0.3, 1.5, 10],
+    },
+  );
+  metrics.requestCounter = new client.Counter(
+    'http_requests_total',
+    'Total number of requests',
+    labels,
+  );
   return metrics;
 };
 
@@ -247,17 +220,10 @@ export const preMiddleware =
         debug('Using path: %s', path);
         // If path is not excluded
         if (shouldMeasure(path, config)) {
-          // restify_status_codes if enabled
-          if (metrics.status) {
-            onFinished(res, (err2: Error, res2: restify.Response) => {
-              debug('Incrementing restify_status_codes %d', (res2.statusCode || 0));
-              metrics.status.inc({ status_code: (res2.statusCode || 0) });
-            });
-          }
-          // restify_path_duration if enabled and restify-defined route
-          if (metrics.pathDuration && !routeFindError) {
+          // http_request_duration_miliseconds if enabled and restify-defined route
+          if (metrics.requestHistogram && !routeFindError) {
             debug('Starting timer for %s %s', req.method, path);
-            const timerEnd: Function = metrics.pathDuration.startTimer({
+            const timerEnd: Function = metrics.requestHistogram.startTimer({
               path,
               method: req.method,
             });
@@ -269,16 +235,16 @@ export const preMiddleware =
               timerEnd(labels);
             });
           }
-          // restify_path_count if enabled and url limit not reached
-          if (metrics.pathCount && pathLimiter.registerPath(path)) {
+          // http_request_count if enabled and url limit not reached
+          if (metrics.requestCounte && pathLimiter.registerPath(path)) {
             onFinished(res, (err2: Error, res2: restify.Response) => {
               const labels: client.labelValues = {
                 path,
                 method: req.method,
                 status_code: (res2 && res2.statusCode) ? res2.statusCode : 0,
               };
-              debug('Incrementing restify_path_duration code %o', labels);
-              metrics.pathCount.inc(labels);
+              debug('Incrementing http_request_duration_miliseconds code %o', labels);
+              metrics.requestCounter.inc(labels);
             });
           }
         }
